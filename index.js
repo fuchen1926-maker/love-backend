@@ -1,4 +1,4 @@
-// index.js - "恋爱脑" 后端服务器 (修复访问码版本)
+// index.js - "恋爱脑" 后端服务器 (完全移除硬编码版本)
 require('dotenv').config();
 
 // 详细的环境变量检查
@@ -84,15 +84,20 @@ async function initializeSettings() {
         const existingConfig = await settingsCollection.findOne({ "type": "main_config" });
         
         if (!existingConfig) {
+            // 如果没有配置，创建一个空的访问码配置
             await settingsCollection.insertOne({
                 type: "main_config",
-                accessCode: "996", // 修改默认访问码为 996
+                accessCode: null, // 初始化为空，需要手动设置
                 createdAt: new Date(),
                 updatedAt: new Date()
             });
-            console.log("✅ 默认设置已初始化，访问码: 996");
+            console.log("⚠️  默认设置已初始化，但访问码为空 - 请在数据库中设置访问码");
         } else {
-            console.log("✅ 设置配置已存在，访问码:", existingConfig.accessCode);
+            if (existingConfig.accessCode) {
+                console.log("✅ 设置配置已存在，访问码:", existingConfig.accessCode);
+            } else {
+                console.log("⚠️  设置配置已存在，但访问码为空 - 请在数据库中设置访问码");
+            }
         }
     } catch (error) {
         console.error("初始化设置时出错:", error);
@@ -108,11 +113,11 @@ app.get('/', (req, res) => {
         message: '「恋爱脑」测试后端 API 正在运行',
         timestamp: new Date().toISOString(),
         database: db ? 'connected' : 'disconnected',
-        version: '2.0.1-access-code-fixed'
+        version: '2.0.2-no-hardcoded-codes'
     });
 });
 
-// 2. 访问码检查接口 - 修复版本：从数据库读取访问码
+// 2. 访问码检查接口 - 完全从数据库读取访问码
 app.post('/api/check-access-code', async (req, res) => {
     try {
         console.log("收到访问码验证请求:", req.body);
@@ -127,10 +132,9 @@ app.post('/api/check-access-code', async (req, res) => {
         }
 
         let isValid = false;
-        let source = "database";
         let dbAccessCode = null;
 
-        // 首先尝试从数据库读取访问码
+        // 从数据库读取访问码
         if (db) {
             try {
                 const settingsCollection = db.collection(SETTINGS_COLLECTION);
@@ -143,35 +147,23 @@ app.post('/api/check-access-code', async (req, res) => {
                         isValid = true;
                     }
                 } else {
-                    console.log("数据库中没有找到访问码配置");
-                    source = "fallback";
+                    console.log("数据库中没有找到访问码配置或访问码为空");
                 }
             } catch (dbError) {
                 console.error("查询数据库时出错:", dbError);
-                source = "fallback";
             }
         } else {
-            source = "fallback";
-            console.log("数据库未连接，使用备用验证");
-        }
-
-        // 如果数据库不可用或没有配置，使用备用验证
-        if (source === "fallback") {
-            const validCodes = ['996', '1234', '0000', 'test', 'lovebrain']; // 将 996 放在首位
-            if (validCodes.includes(accessCode)) {
-                isValid = true;
-            }
+            console.log("数据库未连接，无法验证访问码");
         }
 
         if (isValid) {
-            console.log("访问码验证成功，来源:", source);
+            console.log("访问码验证成功");
             res.json({ 
                 success: true, 
-                message: '验证成功',
-                source: source
+                message: '验证成功'
             });
         } else {
-            console.log("访问码验证失败：输入=", accessCode, "数据库中的访问码=", dbAccessCode, "来源:", source);
+            console.log("访问码验证失败：输入=", accessCode, "数据库中的访问码=", dbAccessCode);
             res.status(401).json({ 
                 success: false, 
                 message: '访问码错误' 
@@ -307,7 +299,7 @@ app.get('/api/status', async (req, res) => {
             success: true,
             status: 'running',
             database: db ? 'connected' : 'disconnected',
-            currentAccessCode: dbAccessCode || '使用备用访问码',
+            currentAccessCode: dbAccessCode || '未设置',
             port: PORT,
             timestamp: new Date().toISOString(),
             environment: process.env.NODE_ENV || 'development'
@@ -356,6 +348,53 @@ app.get('/api/admin/access-info', async (req, res) => {
     }
 });
 
+// 6. 管理员接口：更新访问码
+app.post('/api/admin/update-access-code', async (req, res) => {
+    try {
+        if (!db) {
+            return res.status(500).json({
+                success: false,
+                message: '数据库未连接'
+            });
+        }
+
+        const { accessCode } = req.body;
+        
+        if (!accessCode) {
+            return res.status(400).json({
+                success: false,
+                message: '未提供访问码'
+            });
+        }
+
+        const settingsCollection = db.collection(SETTINGS_COLLECTION);
+        const result = await settingsCollection.updateOne(
+            { type: "main_config" },
+            { 
+                $set: { 
+                    accessCode: accessCode,
+                    updatedAt: new Date()
+                }
+            },
+            { upsert: true }
+        );
+
+        console.log("访问码已更新为:", accessCode);
+        
+        res.json({
+            success: true,
+            message: '访问码更新成功',
+            accessCode: accessCode
+        });
+    } catch (error) {
+        console.error("更新访问码时出错:", error);
+        res.status(500).json({
+            success: false,
+            message: '更新访问码失败'
+        });
+    }
+});
+
 // === 错误处理中间件 ===
 app.use((error, req, res, next) => {
     console.error('服务器错误:', error);
@@ -386,7 +425,7 @@ async function startServer() {
             console.log(`📍 状态检查: http://localhost:${PORT}/api/status`);
             console.log(`📍 访问码信息: http://localhost:${PORT}/api/admin/access-info`);
             console.log(`⏰ 启动时间: ${new Date().toLocaleString()}`);
-            console.log('💡 提示：前端可以通过访问码 996 进行测试');
+            console.log('⚠️  注意：访问码完全从数据库读取，请确保已在数据库中设置访问码');
         });
 
         // 异步连接数据库（不阻塞服务器启动）
