@@ -1,4 +1,4 @@
-// index.js - "恋爱脑" 后端服务器 (稳定兼容版)
+// index.js - "恋爱脑" 后端服务器 (修复访问码版本)
 require('dotenv').config();
 
 // 详细的环境变量检查
@@ -86,11 +86,11 @@ async function initializeSettings() {
         if (!existingConfig) {
             await settingsCollection.insertOne({
                 type: "main_config",
-                accessCode: "1234",
+                accessCode: "996", // 修改默认访问码为 996
                 createdAt: new Date(),
                 updatedAt: new Date()
             });
-            console.log("✅ 默认设置已初始化，访问码: 1234");
+            console.log("✅ 默认设置已初始化，访问码: 996");
         } else {
             console.log("✅ 设置配置已存在，访问码:", existingConfig.accessCode);
         }
@@ -108,12 +108,12 @@ app.get('/', (req, res) => {
         message: '「恋爱脑」测试后端 API 正在运行',
         timestamp: new Date().toISOString(),
         database: db ? 'connected' : 'disconnected',
-        version: '2.0.0-stable'
+        version: '2.0.1-access-code-fixed'
     });
 });
 
-// 2. 访问码检查接口
-app.post('/api/check-access-code', (req, res) => {
+// 2. 访问码检查接口 - 修复版本：从数据库读取访问码
+app.post('/api/check-access-code', async (req, res) => {
     try {
         console.log("收到访问码验证请求:", req.body);
         
@@ -126,17 +126,52 @@ app.post('/api/check-access-code', (req, res) => {
             });
         }
 
-        // 使用硬编码访问码
-        const validCodes = ['1234', '0000', 'test', 'lovebrain'];
-        
-        if (validCodes.includes(accessCode)) {
-            console.log("访问码验证成功");
+        let isValid = false;
+        let source = "database";
+        let dbAccessCode = null;
+
+        // 首先尝试从数据库读取访问码
+        if (db) {
+            try {
+                const settingsCollection = db.collection(SETTINGS_COLLECTION);
+                const config = await settingsCollection.findOne({ type: "main_config" });
+                
+                if (config && config.accessCode) {
+                    dbAccessCode = config.accessCode;
+                    console.log("从数据库读取访问码:", dbAccessCode);
+                    if (dbAccessCode === accessCode) {
+                        isValid = true;
+                    }
+                } else {
+                    console.log("数据库中没有找到访问码配置");
+                    source = "fallback";
+                }
+            } catch (dbError) {
+                console.error("查询数据库时出错:", dbError);
+                source = "fallback";
+            }
+        } else {
+            source = "fallback";
+            console.log("数据库未连接，使用备用验证");
+        }
+
+        // 如果数据库不可用或没有配置，使用备用验证
+        if (source === "fallback") {
+            const validCodes = ['996', '1234', '0000', 'test', 'lovebrain']; // 将 996 放在首位
+            if (validCodes.includes(accessCode)) {
+                isValid = true;
+            }
+        }
+
+        if (isValid) {
+            console.log("访问码验证成功，来源:", source);
             res.json({ 
                 success: true, 
-                message: '验证成功' 
+                message: '验证成功',
+                source: source
             });
         } else {
-            console.log("访问码验证失败：输入=", accessCode);
+            console.log("访问码验证失败：输入=", accessCode, "数据库中的访问码=", dbAccessCode, "来源:", source);
             res.status(401).json({ 
                 success: false, 
                 message: '访问码错误' 
@@ -251,15 +286,74 @@ function generateMockRankings(userScores) {
 }
 
 // 4. 获取服务器状态接口
-app.get('/api/status', (req, res) => {
-    res.json({
-        success: true,
-        status: 'running',
-        database: db ? 'connected' : 'disconnected',
-        port: PORT,
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
-    });
+app.get('/api/status', async (req, res) => {
+    try {
+        let dbAccessCode = null;
+        
+        // 尝试从数据库获取当前访问码
+        if (db) {
+            try {
+                const settingsCollection = db.collection(SETTINGS_COLLECTION);
+                const config = await settingsCollection.findOne({ type: "main_config" });
+                if (config && config.accessCode) {
+                    dbAccessCode = config.accessCode;
+                }
+            } catch (error) {
+                console.error("获取访问码状态时出错:", error);
+            }
+        }
+        
+        res.json({
+            success: true,
+            status: 'running',
+            database: db ? 'connected' : 'disconnected',
+            currentAccessCode: dbAccessCode || '使用备用访问码',
+            port: PORT,
+            timestamp: new Date().toISOString(),
+            environment: process.env.NODE_ENV || 'development'
+        });
+    } catch (error) {
+        console.error("状态检查出错:", error);
+        res.status(500).json({
+            success: false,
+            message: '状态检查失败'
+        });
+    }
+});
+
+// 5. 管理员接口：获取当前访问码信息
+app.get('/api/admin/access-info', async (req, res) => {
+    try {
+        if (!db) {
+            return res.status(500).json({
+                success: false,
+                message: '数据库未连接'
+            });
+        }
+
+        const settingsCollection = db.collection(SETTINGS_COLLECTION);
+        const config = await settingsCollection.findOne({ type: "main_config" });
+        
+        if (config) {
+            res.json({
+                success: true,
+                accessCode: config.accessCode,
+                createdAt: config.createdAt,
+                updatedAt: config.updatedAt
+            });
+        } else {
+            res.status(404).json({
+                success: false,
+                message: '未找到访问码配置'
+            });
+        }
+    } catch (error) {
+        console.error("获取访问码信息时出错:", error);
+        res.status(500).json({
+            success: false,
+            message: '服务器内部错误'
+        });
+    }
 });
 
 // === 错误处理中间件 ===
@@ -290,8 +384,9 @@ async function startServer() {
             console.log(`✅ 服务器正在端口 ${PORT} 上运行`);
             console.log(`📍 本地访问: http://localhost:${PORT}/`);
             console.log(`📍 状态检查: http://localhost:${PORT}/api/status`);
+            console.log(`📍 访问码信息: http://localhost:${PORT}/api/admin/access-info`);
             console.log(`⏰ 启动时间: ${new Date().toLocaleString()}`);
-            console.log('💡 提示：前端可以通过访问码 1234 进行测试');
+            console.log('💡 提示：前端可以通过访问码 996 进行测试');
         });
 
         // 异步连接数据库（不阻塞服务器启动）
